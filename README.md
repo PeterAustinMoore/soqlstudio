@@ -13,3 +13,8 @@ export SODA_PASSWORD='apitoken'
 ```bash
 python app.py
 ```
+
+## Building
+```bash
+cx_freeze app.py
+```

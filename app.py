@@ -2,17 +2,21 @@ import sys, os, requests, json
 
 from functools import partial
 
-from PyQt5.QtCore import Qt
+from PyQt5 import QtCore, QtGui
 from PyQt5.QtWidgets import QApplication,QScrollArea,QGridLayout, QMainWindow, QWidget
 from PyQt5.QtWidgets import QPushButton, QPlainTextEdit, QTabWidget, QDialog, QVBoxLayout, QTableWidgetItem
 from PyQt5.QtWidgets import QFormLayout, QLineEdit, QDialogButtonBox, QLabel, QHBoxLayout, QTableWidget
-from PyQt5.QtGui import QTextCursor, QTextDocument, QFontMetricsF
+# from PyQt5.QtGui import QTextCursor, QTextDocument, QFontMetricsF
 
 from pygments import highlight as _highlight
 from pygments.lexers import SqlLexer
 from pygments.formatters import HtmlFormatter
 
-import sqlfluff
+from AppKit import NSBundle
+import keyring
+from keyring.backends import macOS
+keyring.set_keyring(macOS.Keyring())
+
 
 def style() -> str:
     style = HtmlFormatter().get_style_defs('.highlight')
@@ -32,8 +36,7 @@ def highlight(text):
     highlighted_text = highlighted_text.replace('(:</span><span class="n">id</span>', "(</span><span style='color:#006c82'>:id</span>")
     highlighted_text = highlighted_text.replace('(:</span><span class="n">created_at</span>', "(</span><span style='color:#006c82'>:created_at</span>")
     highlighted_text = highlighted_text.replace('(:</span><span class="n">updated_at</span>', "(</span><span style='color:#006c82'>:updated_at</span>")
-    sqlfluff.list_dialects()
-    result = sqlfluff.lint(text.replace(":id", "id").replace(":created_at", "created_at").replace(":updated_at", "updated_at"), dialect="postgres", rules='L019')
+
     # Split generated HTML by last newline in it
     # argument 1 indicates that we only want to split the string
     # by one specified delimiter from the right.
@@ -108,9 +111,9 @@ class Queries(QWidget):
             doc.setDefaultStyleSheet(style())
             label1.setDocument(doc)
             label1.appendHtml(highlighted)
-            label1.textChanged.connect(partial(self.rehighlight, label1, doc))
+            label1.textChanged.connect(partial(self.rehighlight, label1))
             label1.setTabStopDistance(
-                QFontMetricsF(label1.font()).horizontalAdvance(' ') * 8)
+                QtGui.QFontMetricsF(label1.font()).horizontalAdvance(' ') * 8)
             queryLayout.addWidget(label1)
             queryWidget.setLayout(queryLayout)
             self.tabwidget.addTab(queryWidget, query["queryname"])
@@ -128,7 +131,7 @@ class Queries(QWidget):
         self.changed = False
         self.highlighted = False
 
-    def rehighlight(self, label: QPlainTextEdit, doc: QTextDocument):
+    def rehighlight(self, label: QPlainTextEdit):
         if not self.changed and not self.highlighted:
             self.changed = True
             current_cursor = label.textCursor()
@@ -147,7 +150,7 @@ class Queries(QWidget):
     def addQuery(self, newQuery):
         queryWidget = QWidget()
         queryLayout = QVBoxLayout()
-        label0 = QLabel(self.connection)
+        label0 = QLabel(newQuery['domain'])
         queryLayout.addWidget(label0)
 
         datasetid = QLineEdit()
@@ -160,9 +163,9 @@ class Queries(QWidget):
         highlighted = highlight(newQuery["query"])
         label1.setDocument(doc)
         label1.appendHtml(highlighted)
-        label1.textChanged.connect(partial(self.rehighlight, label1, doc))
+        label1.textChanged.connect(partial(self.rehighlight, label1))
         label1.setTabStopDistance(
-            QFontMetricsF(label1.font()).horizontalAdvance(' ') * 8)
+            QtGui.QFontMetricsF(label1.font()).horizontalAdvance(' ') * 8)
         queryLayout.addWidget(label1)
         queryWidget.setLayout(queryLayout)
         self.tabwidget.addTab(queryWidget, newQuery["queryname"])
@@ -181,14 +184,14 @@ class Connections(QScrollArea):
             options = QPushButton("use")
             options.setMaximumWidth(60)
             options.clicked.connect(lambda c, x=connection: self.parent().parent()._changeDomain(x))
-            domain_layout.addWidget(object, alignment=Qt.AlignmentFlag.AlignLeft)
+            domain_layout.addWidget(object, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
             domain_layout.addWidget(options)
             domain.setLayout(domain_layout)
             self.connections_vbox.addWidget(domain)
         connections_widget.setLayout(self.connections_vbox)
         
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
         self.setWidget(connections_widget)
         self.setMaximumHeight(200)
@@ -198,10 +201,11 @@ class Connections(QScrollArea):
         domain = QWidget()
         domain_layout = QHBoxLayout()
         domain_layout.setContentsMargins(0, 1, 0, 0)
-        object = QLabel(domain_name)
+        object = QLabel(f"{domain_name[0:20]}...")
         options = QPushButton("use")
         options.setMaximumWidth(60)
-        domain_layout.addWidget(object, alignment=Qt.AlignmentFlag.AlignLeft)
+        options.clicked.connect(lambda c: self.parent().parent()._changeDomain(domain_name))
+        domain_layout.addWidget(object, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         domain_layout.addWidget(options)
         domain.setLayout(domain_layout)
         self.connections_vbox.addWidget(domain)
@@ -209,6 +213,7 @@ class Connections(QScrollArea):
 class QueryOptions(QScrollArea):
     def __init__(self, state: dict, domain: str, queries: Queries):
         super().__init__()
+        self._domain = domain
         self.queries = queries
         connections_widget = QWidget()
         self.connections_vbox = QVBoxLayout()
@@ -222,28 +227,29 @@ class QueryOptions(QScrollArea):
                 options = QPushButton("open")
                 options.clicked.connect(lambda c, x=query: queries.addQuery(x))
                 options.setMaximumWidth(70)
-                query_layout.addWidget(object, alignment=Qt.AlignmentFlag.AlignLeft)
+                query_layout.addWidget(object, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
                 query_layout.addWidget(options)
                 query1.setLayout(query_layout)
                 self.connections_vbox.addWidget(query1)
-            connections_widget.setLayout(self.connections_vbox)
+        connections_widget.setLayout(self.connections_vbox)
         
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
         self.setWidget(connections_widget)
         self.setMaximumHeight(500)
         self.setMaximumWidth(250)
     
-    def addQuery(self, queryname: str):
+    def addQuery(self, queryname: str, _domain: str):
+        print("Adding "+ queryname)
         domain = QWidget()
         domain_layout = QHBoxLayout()
         domain_layout.setContentsMargins(0, 1, 0, 0)
         object = QLabel(queryname)
         options = QPushButton("open")
-        options.clicked.connect(lambda c, x: self.queries.addQuery({"queryname": queryname, "datasetid": "", "query": ""}))
+        options.clicked.connect(lambda c: self.queries.addQuery({"queryname": queryname, "datasetid": "", "query": "", "domain": _domain}))
         options.setMaximumWidth(70)
-        domain_layout.addWidget(object, alignment=Qt.AlignmentFlag.AlignLeft)
+        domain_layout.addWidget(object, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
         domain_layout.addWidget(options)
         domain.setLayout(domain_layout)
         self.connections_vbox.addWidget(domain)
@@ -261,7 +267,7 @@ class QueryOptions(QScrollArea):
             options = QPushButton("open")
             options.clicked.connect(lambda c, x=query: self.queries.addQuery(x))
             options.setMaximumWidth(70)
-            query_layout.addWidget(object, alignment=Qt.AlignmentFlag.AlignLeft)
+            query_layout.addWidget(object, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
             query_layout.addWidget(options)
             query1.setLayout(query_layout)
             self.connections_vbox.addWidget(query1)
@@ -269,10 +275,17 @@ class QueryOptions(QScrollArea):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('SoQL Studio LAFFO')
+        self.setWindowTitle('SoQL Studio')
         self.setGeometry(200, 200, 1000, 800)
-        with open("state.json") as f:
-            self.state = json.load(f)
+        self.file = "state.json" # NSBundle.mainBundle().pathForResource_ofType_("state", ".json")
+        self.creds_file = "creds.json" # NSBundle.mainBundle().pathForResource_ofType_("creds", ".json")
+        try:
+            with open(self.file) as f:
+                self.state = json.load(f)
+        except FileNotFoundError:
+            with open(self.file, "w") as f:
+                f.write("{}")
+                self.state = {}
         self._centralWidget = QWidget(self)
         self._domain = ""
         try:
@@ -284,33 +297,81 @@ class MainWindow(QMainWindow):
         self.connections = Connections(self.state)
         self.query_options = QueryOptions(self.state, self._domain, self.queries)
         self._initLayout()
+        self._initCreds()
     
+    def _initCreds(self):
+        try:
+            with open(self.creds_file) as f:
+                self.creds = json.load(f)
+                user = self.creds["username"]
+                pw = keyring.get_password("system", user)
+                self.username.setText(user)
+                self.password.setText(pw)
+        except Exception:
+            with open(self.creds_file, "w") as f:
+                f.write("{}")
+
     def _changeDomain(self, domain):
         self._domain = domain
         self.query_options.resetQueries(self.state, self._domain)
         self.queries.connection = domain
 
+    def _writeCreds(self):
+        keyring.set_password("system", self.username.text(), self.password.text())
+        with open(self.creds_file, "w") as f:
+            data = {"username": self.username.text()}
+            f.write(json.dumps(data))
+
     def _initLayout(self):
         layout = QGridLayout()
         left_bar = QVBoxLayout()
+        
+        creds_layout = QVBoxLayout()
+        username_box = QHBoxLayout()
+        self.username = QLineEdit()
+        self.username.setMaximumWidth(100)
+        user_label = QLabel("Username: ")
+        user_label.setMaximumWidth(70)
+        username_box.addWidget(user_label)
+        username_box.addWidget(self.username)
+        creds_layout.addLayout(username_box)
+
+        password_box = QHBoxLayout()
+        self.password = QLineEdit()
+        self.password.setMaximumWidth(100)
+        self.password.setEchoMode(QLineEdit.Password)
+        pass_label = QLabel("Password: ")
+        pass_label.setMaximumWidth(70)
+        password_box.addWidget(pass_label)
+        password_box.addWidget(self.password)
+        creds_layout.addLayout(password_box)
+
+        saveCredsButton = QPushButton("Save Credentials")
+        saveCredsButton.clicked.connect(self._writeCreds)
+        creds_layout.addWidget(saveCredsButton)
+
+        left_bar.addLayout(creds_layout)
+
 
         connection_layout = QVBoxLayout()
-        connection_layout.addWidget(QLabel('Connections'), alignment=Qt.AlignmentFlag.AlignTop)
-        connection_layout.addWidget(self.connections, alignment=Qt.AlignmentFlag.AlignTop)
+        connection_layout.addWidget(QLabel('Connections'), alignment=QtCore.Qt.AlignmentFlag.AlignTop)
+        connection_layout.addWidget(self.connections, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
         newConnection = QPushButton("New Connection")
+        newConnection.setMaximumWidth(250)
         newConnection.clicked.connect(self._setupConnection)
-        connection_layout.addWidget(newConnection, alignment=Qt.AlignmentFlag.AlignBottom)
+        connection_layout.addWidget(newConnection, alignment=QtCore.Qt.AlignmentFlag.AlignBottom)
         left_bar.addLayout(connection_layout)
 
         dataset_layout = QVBoxLayout()
         dataset_layout.addWidget(QLabel('Queries'))
-        dataset_layout.addWidget(self.query_options, alignment=Qt.AlignmentFlag.AlignTop)
+        dataset_layout.addWidget(self.query_options, alignment=QtCore.Qt.AlignmentFlag.AlignTop)
         newQuery = QPushButton("New Query")
+        newQuery.setMaximumWidth(250)
         newQuery.clicked.connect(self._setupQuery)
-        dataset_layout.addWidget(newQuery, alignment=Qt.AlignmentFlag.AlignBottom)
+        dataset_layout.addWidget(newQuery, alignment=QtCore.Qt.AlignmentFlag.AlignBottom)
         left_bar.addLayout(dataset_layout)
 
-        layout.addLayout(left_bar, 0, 0)
+        layout.addLayout(left_bar, 0, 0, 1, 1)
 
         layout.addWidget(self.queries, 0, 1, 1, 5)
         self.queries.submitButton.clicked.connect(self._execute)
@@ -330,15 +391,18 @@ class MainWindow(QMainWindow):
             self.state[newDomain] = {"queries": []}
             self._saveState()
             self.connections.addConnection(newDomain)
+            if self._domain == "":
+                self._domain = newDomain
 
     def _setupQuery(self):
         newQueryDialog = QueryDialog()
         newQueryDialog.exec_()
         newQueryName = newQueryDialog.queryname.text()
+        print(newQueryName)
         if newQueryName != "":
-            data = {"query": "", "queryname": newQueryName, "datasetid": ""}
+            data = {"query": "", "queryname": newQueryName, "datasetid": "", "domain": self._domain}
             self.state[self._domain]["queries"].append(data)
-            self.query_options.addQuery(newQueryName)
+            self.query_options.addQuery(newQueryName, self._domain)
             self._saveState()
             self.queries.addQuery(data)
 
@@ -353,7 +417,7 @@ class MainWindow(QMainWindow):
         print(f"executing from tab {tab} for {domain} - {datasetid}: {query.toPlainText()}")
         url = f"https://{domain}/resource/{datasetid}.json?$query={requests.utils.quote(query.toPlainText())}" #
         print(url)
-        r = requests.get(url, auth=(os.getenv('SODA_USERNAME'),os.getenv('SODA_PASSWORD')))
+        r = requests.get(url, auth=(self.username.text(),self.password.text()), verify=False)
         self._setResults(r.json())
     
     def _setResults(self, data):
@@ -391,12 +455,15 @@ class MainWindow(QMainWindow):
         self._saveState()
 
     def _saveState(self):
-        with open("state.json", "w") as f:
+        with open(self.file, "w") as f:
             f.write(json.dumps(self.state, indent=4))
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    window.raise_()
-    app.exec_()
+    try:
+        print("Starting App...")
+        app = QApplication([])
+        window = MainWindow()
+        window.show()
+        app.exec_()
+    except SystemExit as e:
+        print(f"ENDED EARLY: {e}")
