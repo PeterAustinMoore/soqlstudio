@@ -1,8 +1,9 @@
-import sys, os, requests, json
+import requests, json, datetime, csv, io
 
 from functools import partial
 
 from PyQt5 import QtCore, QtGui
+from fbs_runtime.application_context.PyQt5 import ApplicationContext
 from PyQt5.QtWidgets import QApplication,QScrollArea,QGridLayout, QMainWindow, QWidget
 from PyQt5.QtWidgets import QPushButton, QPlainTextEdit, QTabWidget, QDialog, QVBoxLayout, QTableWidgetItem
 from PyQt5.QtWidgets import QFormLayout, QLineEdit, QDialogButtonBox, QLabel, QHBoxLayout, QTableWidget
@@ -12,7 +13,6 @@ from pygments import highlight as _highlight
 from pygments.lexers import SqlLexer
 from pygments.formatters import HtmlFormatter
 
-from AppKit import NSBundle
 import keyring
 from keyring.backends import macOS
 keyring.set_keyring(macOS.Keyring())
@@ -415,30 +415,33 @@ class MainWindow(QMainWindow):
         domainWidget: QLabel = queryWidget.findChild(QLabel)
         domain = domainWidget.text()
         print(f"executing from tab {tab} for {domain} - {datasetid}: {query.toPlainText()}")
-        url = f"https://{domain}/resource/{datasetid}.json?$query={requests.utils.quote(query.toPlainText())}" #
+        url = f"https://{domain}/resource/{datasetid}.csv?$query={requests.utils.quote(query.toPlainText())}" #
         print(url)
-        r = requests.get(url, auth=(self.username.text(),self.password.text()), verify=False)
-        self._setResults(r.json())
+        start = datetime.datetime.now()
+        if url.find("localhost") == -1:
+            r = requests.get(url, auth=(self.username.text(),self.password.text()), timeout=3600)
+        else:
+            r = requests.get(url, auth=(self.username.text(),self.password.text()), verify=False)
+        elapsed = (datetime.datetime.now() - start).seconds
+        reader = csv.reader(io.StringIO(r.content.decode('utf-8')))
+        self._setResults(list(reader), elapsed)
     
-    def _setResults(self, data):
+    def _setResults(self, data: list, elapsed):
         self.results_layout.reset()
         try:
-            self.results_label.setText(f"Results: {len(data)} records")
-            if len(data) == 0:
-                return
-            if len(data) > 10:
-                data = data[0:11]
-            cols = data[0].keys()
+            self.results_label.setText(f"Results: {len(data)} records in {elapsed} seconds")
+            # del data[0]
+            cols = data[0]
+            del data[0]
             self.results_layout.setColumnCount(len(cols))
             self.results_layout.setRowCount(len(data))
             self.results_layout.setHorizontalHeaderLabels(cols)
-            for i, result in enumerate(data):
-                for j, v in enumerate(result.values()):
-                    row = QTableWidgetItem(str(v))
-                    self.results_layout.setItem(i, j, row)
-        except:
-            message = data['message'].replace('\n', ' ')[0:50]
-            self.results_label.setText(f"Result ERROR: {message}...")
+            for i, row in enumerate(data):
+                for j, v in enumerate(row):
+                    cell = QTableWidgetItem(str(v))
+                    self.results_layout.setItem(i, j, cell)
+        except Exception as e:
+            self.results_label.setText(f"Result ERROR: {e}...")
             self.results_layout.reset()
 
     def _saveQuery(self):
