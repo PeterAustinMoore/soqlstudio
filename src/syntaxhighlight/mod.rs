@@ -65,7 +65,7 @@ impl Highlighter {
                     leading_space: 0.0,
                     byte_range: as_byte_range(text, range),
                     format: TextFormat {
-                        font_id: egui::FontId::monospace(12.0),
+                        font_id: egui::FontId::monospace(20.0),
                         color: text_color,
                         italics,
                         underline,

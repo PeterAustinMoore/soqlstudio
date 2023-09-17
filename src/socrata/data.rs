@@ -20,19 +20,19 @@ pub enum Container {
 }
 
 #[derive(Default)]
-pub struct NetworkImage {
-    pub image: Option<Vec<Vec<String>>>,
+pub struct ResponseData {
+    pub data: Option<Vec<Vec<String>>>,
     pub file_size: usize,
     pub tmp_file_size: usize,
-    pub show_image_progress: bool,
+    pub is_running: bool,
     pub error: Option<String>,
     pub seed: usize,
 }
 
-impl NetworkImage {
-    pub fn set_image(&mut self, image: Vec<Vec<String>>) {
+impl ResponseData {
+    pub fn set_data(&mut self, data: Vec<Vec<String>>) {
         self.error.take();
-        self.image = Some(image);
+        self.data = Some(data);
     }
 
     pub fn set_error(&mut self, e: impl ToString) {
@@ -45,7 +45,7 @@ impl NetworkImage {
             self.tmp_file_size /= 1000;
             self.file_size = self.tmp_file_size;
         }
-        self.show_image_progress = false;
+        self.is_running = false;
         self.tmp_file_size = 0;
     }
 }

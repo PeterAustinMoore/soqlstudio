@@ -1,42 +1,47 @@
 use eframe::{egui, CreationContext};
+use egui::{RichText, FontId};
 use flowync::{
     error::{Compact, IOError},
     CompactFlower, CompactHandle, IntoResult,
 };
+use egui_dock::{DockArea, NodeIndex, Style, Tree};
 use csv;
 use std::str;
-use reqwest::Client;
+use reqwest::{Client, Response};
 use tokio::runtime;
 use tokio::time::{Instant, Duration};
-mod utils;
-use utils::{Channel, Container, ErrCause, NetworkImage};
+
 mod config;
 use config::{get_config, set_config, Config};
 mod socrata;
-use socrata::make_query;
+use socrata::{make_query, make_analyze_url};
+use socrata::data::{Channel, Container, ErrCause, ResponseData};
+use socrata::analysis::{AnalysisChannel, AnalysisContainer, AnalysisErrCause, AnalysisResponseData};
 mod syntaxhighlight;
 
 const PPP: f32 = 1.25;
 
 fn main() {
-    let mut options = eframe::NativeOptions::default();
-    options.always_on_top = true;
+    let options = eframe::NativeOptions::default();
     eframe::run_native(
         "SoQL Studio",
         options,
-        Box::new(|ctx| Box::new(EframeTokioApp::new(ctx))),
+        Box::new(|ctx| Box::new(SoqlStudio::new(ctx))),
     );
 }
 
-type TypedFlower = CompactFlower<Channel, Container, ErrCause>;
-type TypedFlowerHandle = CompactHandle<Channel, Container, ErrCause>;
+type DataFlower = CompactFlower<Channel, Container, ErrCause>;
+type DataFlowerHandle = CompactHandle<Channel, Container, ErrCause>;
+type AnalysisFlower = CompactFlower<AnalysisChannel, AnalysisContainer, AnalysisErrCause>;
 
-struct EframeTokioApp {
+struct SoqlStudio {
     rt: runtime::Runtime,
-    flower: TypedFlower,
+    flower: DataFlower,
+    analysis_flower: AnalysisFlower,
     get_data: bool,
     btn_label_next: String,
-    net_image: NetworkImage,
+    csv_data: ResponseData,
+    analysis_data: AnalysisResponseData,
     domain: String,
     username: String,
     password: String,
@@ -46,7 +51,7 @@ struct EframeTokioApp {
     query_duration: Duration,
 }
 
-impl EframeTokioApp {
+impl SoqlStudio {
     fn new(ctx: &CreationContext) -> Self {
         ctx.egui_ctx.set_pixels_per_point(PPP);
         let c = get_config();
@@ -55,10 +60,12 @@ impl EframeTokioApp {
                 .enable_all()
                 .build()
                 .unwrap(),
-            flower: TypedFlower::new(1),
+            flower: DataFlower::new(1),
+            analysis_flower: AnalysisFlower::new(2),
             get_data: true,
-            btn_label_next: "Run".into(),
-            net_image: Default::default(),
+            btn_label_next: "Run Query".into(),
+            csv_data: Default::default(),
+            analysis_data: Default::default(),
             username: c.username,
             password: c.password,
             domain: c.domain,
@@ -69,12 +76,11 @@ impl EframeTokioApp {
         }
     }
 
-    async fn fetch_image(url: String, username: String, password: String, handle: &TypedFlowerHandle) -> Result<Container, IOError> {
+    async fn fetch_data(url: String, username: String, password: String, handle: &DataFlowerHandle) -> Result<Container, IOError> {
         let start = Instant::now();
         // Build a client
         let client = Client::builder()
             // Needed to set UA to get image file, otherwise reqwest error 403
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:105.0) Gecko/20100101")
             .build()?;
         let mut response = client
             .get(url)
@@ -87,8 +93,10 @@ impl EframeTokioApp {
             .headers()
             .get("Content-Type")
             .catch("unable to get content type")?
-            .to_str()?;
-
+            .to_str()?
+            .to_owned();
+        
+        
         if content_type.contains("text/csv") {
             let cancelation_msg = "Fetching image canceled.";
             let mut image_bytes = Vec::new();
@@ -144,11 +152,15 @@ impl EframeTokioApp {
             let t = Container::Data(first_ten_records);
             Ok(t)
         } else {
-            Err(format!("Expected  CSV; found {}", content_type).into())
+            let err = response.text().await;
+            let t = format!("Expected  CSV; found {}: {:?}", content_type, err).into();
+            Err(t)
         }
     }
 
-    fn spawn_fetch_image(&mut self) {
+    
+
+    fn spawn_fetch_data(&mut self) {
         // Save the new config
         let new_config = Config {
             username: self.username.to_owned(),
@@ -160,11 +172,11 @@ impl EframeTokioApp {
         set_config(new_config);
 
         self.url = make_query(self.domain.as_str(), self.dataset.as_str(), self.current_query.as_str());
-        println!("{}", self.url);
+        println!("Making call to: {}", self.url);
         // Set error to None
-        self.net_image.error.take();
-        // Show download image progress
-        self.net_image.show_image_progress = true;
+        self.csv_data.error.take();
+        // Show query progress
+        self.csv_data.is_running = true;
         // Get flower handle
         let handle = self.flower.handle();
         let url = self.url.to_owned();
@@ -175,33 +187,120 @@ impl EframeTokioApp {
             // Don't forget to activate flower here
             handle.activate();
             // Start fetching
-            match Self::fetch_image(url, username, password, &handle).await {
+            match Self::fetch_data(url, username, password, &handle).await {
                 Ok(container) => handle.success(container),
                 Err(e) => handle.error(ErrCause::Data(format!("{:?}", e))),
             }
         });
     }
 
-    fn reset_fetch_image(&mut self) {
+    fn reset_fetch(&mut self) {
         // Handle logical accordingly
-        self.net_image.repair();
+        self.csv_data.repair();
         if self.get_data && self.flower.is_canceled() {
-            if self.net_image.seed > 1 {
-                self.net_image.seed -= 1;
+            if self.csv_data.seed > 1 {
+                self.csv_data.seed -= 1;
             }
             self.btn_label_next = "Retry?".into();
         } else if !self.get_data && self.flower.is_canceled() {
-            self.net_image.seed += 1;
+            self.csv_data.seed += 1;
         } else {
-            self.btn_label_next = "Run".into();
+            self.btn_label_next = "Run Query".into();
+        }
+    }
+
+    fn spawn_analyze_query(&mut self) {
+        let new_config = Config {
+            username: self.username.to_owned(),
+            password: self.password.to_owned(),
+            domain: self.domain.to_owned(),
+            dataset: self.dataset.to_owned(),
+            query: self.current_query.to_owned()
+        };
+        set_config(new_config);
+        self.url = make_analyze_url(self.domain.as_str(), self.dataset.as_str(), self.current_query.as_str());
+        println!("{}", self.url);
+        // Set error to None
+        self.csv_data.error.take();
+        // Show query progress
+        self.csv_data.is_running = true;
+        // Get flower handle
+        let handle = self.analysis_flower.handle();
+        let url = self.url.to_owned();
+        let username = self.username.to_owned();
+        let password = self.password.to_owned();
+        self.rt.spawn(async move {
+            // Don't forget to activate flower here
+            handle.activate();
+            // Start fetching
+            match Self::fetch_analysis(url, username, password).await {
+                Ok(container) => handle.success(container),
+                Err(e) => handle.error(AnalysisErrCause::Data(format!("{:?}", e))),
+            }
+        });
+    }
+
+    async fn fetch_analysis(url: String, username: String, password: String) -> Result<AnalysisContainer, IOError> {
+        let client = reqwest::Client::new();
+        let response: Response = client
+            .get(url)
+            .basic_auth(username, Some(password))
+            .send()
+            .await?;
+        if response.status().is_success() {
+            Ok(AnalysisContainer::Data("Hello".into()))
+        } else {
+            Err("Bad Call".into())
         }
     }
 }
 
-impl eframe::App for EframeTokioApp {
+impl eframe::App for SoqlStudio {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Labels
+        let app_header = RichText::new("SoQL Studio").font(FontId::proportional(60.0)).color(egui::Color32::WHITE);
+        let settings_header = RichText::new("Settings").font(FontId::proportional(40.0));
+        let username_label = RichText::new("Username: ").font(FontId::proportional(25.0));
+        let password_label = RichText::new("Password: ").font(FontId::proportional(25.0));
+        let domain_label = RichText::new("Domain: ").font(FontId::proportional(25.0));
+        let id_label = RichText::new("Dataset ID: ").font(FontId::proportional(25.0));
+        
+        egui::TopBottomPanel::new(egui::panel::TopBottomSide::Top, "header").show(ctx, |ui| {
+            ui.heading(app_header);
+        });
+
+        egui::SidePanel::new(egui::panel::Side::Left, "id_source").show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.heading(settings_header);
+            ui.label(username_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.username)
+                    .font(FontId::proportional(25.0))
+                    .desired_width(375.0)
+                
+            );
+            ui.label(password_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.password)
+                    .font(FontId::proportional(25.0))
+                    .password(true).desired_width(375.0)
+            );
+            ui.label(domain_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.domain)
+                    .font(FontId::proportional(25.0))
+                    .desired_width(375.0)
+            );
+            ui.label(id_label);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.dataset)
+                    .font(FontId::proportional(25.0))
+                    .desired_width(375.0)
+            );
+
+        });
+        
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("SoQL Studio");
             let mut layouter = |ui: &egui::Ui, string: &str, wrap_width: f32| {
                 let mut layout_job =
                     syntaxhighlight::highlight(ui.ctx(), string, "sql");
@@ -209,12 +308,12 @@ impl eframe::App for EframeTokioApp {
                 ui.fonts().layout_job(layout_job)
             };
             if self.flower.is_active() {
-                let mut fetch_image_finalized = false;
+                let mut fetch_data_finalized = false;
                 self.flower
                     .extract(|message| {
                         match message {
                             Channel::Data(b) => {
-                                self.net_image.tmp_file_size += b;
+                                self.csv_data.tmp_file_size += b;
                             }
                             Channel::Elapsed(e) => {
                                 self.query_duration = e
@@ -225,87 +324,90 @@ impl eframe::App for EframeTokioApp {
                         match result {
                             Ok(Container::Elapsed(_)) => {}
                             Ok(Container::Data(data)) => {
-                                self.net_image.set_image(data);
-                                fetch_image_finalized = true;
+                                self.csv_data.set_data(data);
+                                fetch_data_finalized = true;
                             }
                             Err(Compact::Suppose(err)) => {
                                 // Get specific error message.
                                 match err {
-                                    ErrCause::Elapsed(e) => {
-                                        println!("{}", e)
+                                    ErrCause::Elapsed(_e) => {
+                                        self.query_duration = Duration::new(0, 0);
                                     }
                                     ErrCause::Data(e) => {
-                                        // Handle if DataErr is any.
-                                        println!("{}", e)
+                                        self.csv_data.set_error(e);
                                     }
                                 }
+                                fetch_data_finalized = true;
                             }
                             // Handle stuff if tokio runtime panicked as well,
                             // but don't do that and stay calm is highly encouraged.
                             Err(Compact::Panicked(err)) => {
-                                self.net_image.set_error(err);
-                                fetch_image_finalized = true;
+                                self.csv_data.set_error(err);
+                                fetch_data_finalized = true;
                             }
                         }
                     });
 
-                if fetch_image_finalized {
-                    self.reset_fetch_image();
+                if fetch_data_finalized {
+                    self.reset_fetch();
+                }
+            }
+            if self.analysis_flower.is_active() {
+                let mut fetch_analysis_finalized = false;
+                self.analysis_flower
+                    .extract(|message| {
+                        match message {
+                            // Not using this for anything yet
+                            AnalysisChannel::Data(_) => {}
+                        }
+                    })
+                    .finalize(|result| {
+                        match result {
+                            Ok(AnalysisContainer::Data(data)) => {
+                                self.analysis_data.set_data(data);
+                                fetch_analysis_finalized = true;
+                            }
+                            Err(Compact::Suppose(err)) => {
+                                // Get specific error message.
+                                match err {
+                                    AnalysisErrCause::Data(e) => {
+                                        self.analysis_data.set_error(e);
+                                    }
+                                }
+                                fetch_analysis_finalized = true;
+                            }
+                            // Handle stuff if tokio runtime panicked as well,
+                            // but don't do that and stay calm is highly encouraged.
+                            Err(Compact::Panicked(err)) => {
+                                self.analysis_data.set_error(err);
+                                fetch_analysis_finalized = true;
+                            }
+                        }
+                    });
+
+                if fetch_analysis_finalized {
+                    self.reset_fetch();
                 }
             }
 
-
-            ui.horizontal(|app| {
-                // Settings and Query Section
-                app.horizontal(|settings_and_query| {
-                    //Settings
-                    settings_and_query.set_height(200.0);
-                    settings_and_query.vertical(|settings| {
-                        settings.set_width(300.0);
-                        // Credentials
-                        settings.horizontal(|ui| {
-                            ui.label("Username: ");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |uu| {
-                                uu.text_edit_singleline(&mut self.username);
-                            });
-                        });
-                        settings.horizontal(|ui| {
-                            ui.label("Password: ");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |uu| {
-                                uu.add(egui::TextEdit::singleline(&mut self.password).password(true));
-                            });
-                        });
-                        // Domain and Dataset configs
-                        settings.horizontal(|ui| {
-                            ui.label("Domain: ");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |uu| {
-                                uu.text_edit_singleline(&mut self.domain);
-                            });
-                        });
-                        settings.horizontal(|ui| {
-                            ui.label("Dataset: ");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::RIGHT), |uu| {
-                                uu.text_edit_singleline(&mut self.dataset);
-                            });
-                        });
-                    });
-                    settings_and_query.vertical(|query| {
-                        egui::ScrollArea::vertical().max_height(200.0).show(query, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut self.current_query)
-                                    .font(egui::TextStyle::Monospace) // for cursor height
-                                    .code_editor()
-                                    .desired_rows(10)
-                                    .lock_focus(true)
-                                    .desired_width(f32::INFINITY)
-                                    .layouter(&mut layouter),
-                            );
-                        });
-                    });
+            ui.horizontal(|query_box| {
+                query_box.set_height(600.0);
+                egui::ScrollArea::vertical().max_height(900.0).show(query_box, |query_box| {
+                    query_box.add(
+                        egui::TextEdit::multiline(&mut self.current_query)
+                            // .font(egui::TextStyle::Monospace) // for cursor height
+                            .font(egui::TextStyle::Heading)
+                            .code_editor()
+                            .desired_rows(80)
+                            .lock_focus(true)
+                            .desired_width(f32::INFINITY)
+                            .layouter(&mut layouter),
+                    );
                 });
             });
-            ui.horizontal(|ui| {
-                if ui.button(&self.btn_label_next).clicked() {
+            // Action Buttons
+            ui.horizontal(|action_buttons| {
+                if action_buttons.button(egui::RichText::new(&self.btn_label_next).font(egui::FontId::proportional(30.0))).clicked() {
                     if self.flower.is_active() {
                         if !self.get_data {
                             self.btn_label_next = "Wait we are still fetching...".into();
@@ -314,19 +416,37 @@ impl eframe::App for EframeTokioApp {
                         }
                     } else {
                         // Refetch next image
-                        self.net_image.seed += 1;
-                        self.spawn_fetch_image();
+                        self.csv_data.seed += 1;
+                        self.spawn_fetch_data();
+                        self.get_data = true;
+                        self.btn_label_next = "Cancel?".into();
+                    }
+                }
+                if action_buttons.button(egui::RichText::new("Save Query").font(egui::FontId::proportional(30.0))).clicked() {
+                    //TODO: Save the query to a file
+                }
+                if action_buttons.button(egui::RichText::new("Run Query Analysis").font(egui::FontId::proportional(30.0))).clicked() {
+                    if self.flower.is_active() {
+                        if !self.get_data {
+                            self.btn_label_next = "Wait we are still fetching...".into();
+                        } else {
+                            self.flower.cancel();
+                        }
+                    } else {
+                        // Refetch next image
+                        self.csv_data.seed += 1;
+                        self.spawn_analyze_query();
                         self.get_data = true;
                         self.btn_label_next = "Cancel?".into();
                     }
                 }
             });
-
-            if self.net_image.show_image_progress {
+            // The query is being executed
+            if self.csv_data.is_running {
                 ui.horizontal(|ui| {
                     // We don't need to call repaint since we are using spinner here.
                     ui.spinner();
-                    let mut downloaded_size = self.net_image.tmp_file_size;
+                    let mut downloaded_size = self.csv_data.tmp_file_size;
                     if downloaded_size > 0 {
                         // Convert current file size in Bytes to KB.
                         downloaded_size /= 1000;
@@ -336,34 +456,52 @@ impl eframe::App for EframeTokioApp {
                 });
             }
 
-            if let Some(err) = &self.net_image.error {
-                ui.colored_label(ui.visuals().error_fg_color, err);
+            if let Some(err) = &self.csv_data.error {
+                ui.colored_label(ui.visuals().error_fg_color, egui::RichText::new(err).font(egui::FontId::proportional(40.0)));
             }
 
-            if let Some(csv_data) = &self.net_image.image {
-                let file_size = self.net_image.file_size;
-                ui.label(format!("Current file size: {} KB", file_size));
-                ui.label(format!(
-                    "Query Elapsed: {:#?}",
-                    self.query_duration
-                ));
-                ui.label("URL:");
-                let text_edit = egui::TextEdit::singleline(&mut self.url).desired_width(1000.0);
+            if let Some(csv_data) = &self.csv_data.data {
+                let text_edit = egui::TextEdit::singleline(&mut self.url)
+                    .desired_width(f32::INFINITY)
+                    .font(FontId::proportional(20.0));
                 ui.add(text_edit);
-
+                // Query Results Table
+                ui.label(egui::RichText::new("Results").font(egui::FontId::proportional(30.0)));
                 egui::ScrollArea::both()
                     .auto_shrink([true, true])
                     .show(ui, |ui| {
-                        egui::Grid::new("my_grid").show(ui, |grid| {
-                            for row in csv_data.iter() {
-                                for cell in row.iter() {
-                                    grid.label(cell);
+                        egui::Grid::new("my_grid").striped(true).show(ui, |grid| {
+                            for (i, row) in csv_data.iter().enumerate() {
+                                if i == 0 {
+                                    for cell in row.iter() {
+                                        grid.label(egui::RichText::new(cell).font(egui::FontId::proportional(30.0)));
+                                    }
+                                } else {
+                                    for cell in row.iter() {
+                                        grid.label(egui::RichText::new(cell).font(egui::FontId::proportional(20.0)));
+                                    }
                                 }
                                 grid.end_row();
                             }
                         })
                     });
+                // Query Stats
+                ui.label(egui::RichText::new("Statistics").font(egui::FontId::proportional(30.0)));
+                let file_size = self.csv_data.file_size;
+                ui.label(egui::RichText::new(
+                    format!("Current file size: {} KB", file_size)
+                ).font(egui::FontId::proportional(20.0)));
+                // Query Elapsed Text
+                ui.label(egui::RichText::new(format!(
+                    "Query Elapsed: {:#?}",
+                    self.query_duration
+                )).font(egui::FontId::proportional(20.0)));
             }
+        });
+
+        egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
+            ui.label("C - Peter M.");
+            ui.label("")
         });
     }
 }

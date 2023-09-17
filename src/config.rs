@@ -13,7 +13,7 @@ pub struct Config {
 
 pub fn get_config() -> Config {
     let raw_config = std::fs::read_to_string(CONFIG_JSON_FILE_PATH).unwrap_or(String::from(r#"
-    {"username":"", "password":"", "domain":"", "dataset":"", "query":""}
+    {"username":"", "password":"", "domain":"", "dataset":"", "query":"","theme":"light"}
     "#));
     serde_json::from_str::<Config>(&raw_config).unwrap_or(Config {
         username: "".to_owned(),
